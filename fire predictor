@@ -1,0 +1,57 @@
+import numpy as np
+import rasterio
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+import joblib
+import os
+
+# Define paths
+base_path = "./"  # Set to where your .tif files are stored
+features = [
+    "elevation_gadchiroli.tif",
+    "slope_gadchiroli.tif",
+    "aspect_gadchiroli.tif",
+    "temperature_gadchiroli.tif",
+    "humidity_gadchiroli.tif",
+    "wind_speed_gadchiroli.tif",
+    "lulc_gadchiroli.tif"
+]
+label_file = "fire_label_gadchiroli.tif"
+
+# Load all features and flatten into columns
+X = []
+for file in features:
+    with rasterio.open(os.path.join(base_path, file)) as src:
+        data = src.read(1)
+        X.append(data.flatten())
+
+# Stack features to shape (n_samples, n_features)
+X = np.stack(X, axis=1)
+
+# Load labels and flatten
+with rasterio.open(os.path.join(base_path, label_file)) as src:
+    y = src.read(1).flatten()
+
+# Remove any invalid rows (optional, if no nodata)
+valid_mask = ~np.isnan(X).any(axis=1)
+X_valid = X[valid_mask]
+y_valid = y[valid_mask]
+
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(X_valid, y_valid, test_size=0.2, random_state=42)
+
+# Train a Random Forest
+clf = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
+clf.fit(X_train, y_train)
+
+# Evaluate
+y_pred = clf.predict(X_test)
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_pred))
+
+# Save the model
+joblib.dump(clf, os.path.join(base_path, "fire_spread_model.pkl"))
+print("✅ Model saved as fire_spread_model.pkl")
