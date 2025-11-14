@@ -1,0 +1,562 @@
+mport tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import schedule
+import time
+import threading
+from datetime import datetime, timedelta
+import pytz
+import csv
+import os
+
+TIMEZONE = 'Asia/Kolkata'
+
+
+class FinancialTask:
+    def __init__(self, task_id, description, due_date_str, priority, recurrence_days=None):
+        self.task_id = int(task_id)
+        self.description = description
+        self.due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.timezone(TIMEZONE))
+        self.priority = int(priority)
+        self.recurrence_days = int(recurrence_days) if recurrence_days else None
+        self.completed = False
+        self.retry_count = 0
+
+    def to_dict(self):
+        return {
+            'task_id': self.task_id,
+            'description': self.description,
+            'due_date': self.due_date.strftime("%Y-%m-%d %H:%M:%S"),
+            'priority': self.priority,
+            'recurrence_days': self.recurrence_days if self.recurrence_days else "",
+            'completed': str(self.completed)
+        }
+
+    @staticmethod
+    def from_dict(data):
+        task = FinancialTask(
+            data['task_id'], data['description'], data['due_date'],
+            data['priority'], data.get('recurrence_days')
+        )
+        task.completed = str(data.get('completed')).lower() == 'true'
+        return task
+
+
+# ---------------------- File Operations ---------------------- #
+def load_tasks_from_csv(file_path):
+    tasks = []
+    if not os.path.exists(file_path):
+        messagebox.showerror("Error", f"File not found: {file_path}")
+        return tasks
+    with open(file_path, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            task = FinancialTask.from_dict(row)
+            tasks.append(task)
+    return tasks
+
+
+def save_tasks_to_csv(tasks, file_path):
+    with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['task_id', 'description', 'due_date', 'priority', 'recurrence_days', 'completed']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for t in tasks:
+            writer.writerow(t.to_dict())
+
+
+# ---------------------- Financial Priority Concepts ---------------------- #
+def calculate_task_urgency_score(task, now):
+    """
+    Calculate urgency score using Time Value of Money concept
+    Formula: Urgency = (Priority Weight) / (Time to Due Date)
+    Higher score = More urgent
+    """
+    time_delta = (task.due_date - now).total_seconds() / 3600  # hours
+
+    # Prevent division by zero, treat overdue as maximum urgency
+    if time_delta <= 0:
+        time_delta = 0.01  # Nearly zero for maximum urgency
+
+    # Priority weights (inspired by risk ratings in finance)
+    priority_weights = {
+        1: 100,  # Critical (like Tier 1 capital requirements)
+        2: 50,  # High (like regulatory deadlines)
+        3: 25,  # Medium (like quarterly reviews)
+        4: 10,  # Low (like routine reports)
+    }
+
+    weight = priority_weights.get(task.priority, 10)
+    urgency_score = weight / time_delta
+
+    return urgency_score
+
+
+def calculate_compound_priority(task, now):
+    """
+    Compound Priority (inspired by Compound Interest)
+    Priority grows exponentially as deadline approaches
+    Formula: CP = Priority × (1 + r)^days_overdue
+    """
+    days_until_due = (task.due_date - now).days
+
+    if days_until_due < 0:  # Overdue
+        # Exponential growth like compound interest
+        days_overdue = abs(days_until_due)
+        growth_rate = 0.15  # 15% daily compound rate
+        compound_factor = (1 + growth_rate) ** days_overdue
+        return task.priority * compound_factor * 10
+    else:
+        return task.priority
+
+
+def get_early_warning_days(priority):
+    """
+    Early Warning System (like Credit Rating Alerts)
+    Higher priority = Earlier notifications
+    """
+    warning_schedule = {
+        1: [7, 3, 1, 0],  # 1 week, 3 days, 1 day, due date
+        2: [5, 2, 0],  # 5 days, 2 days, due date
+        3: [3, 0],  # 3 days, due date
+        4: [0],  # Due date only
+    }
+    return warning_schedule.get(priority, [0])
+
+
+def apply_risk_adjusted_notification(task, now):
+    """
+    Risk-Adjusted Notification Timing
+    Uses VaR (Value at Risk) concept - notify based on risk exposure
+    """
+    days_until_due = (task.due_date - now).days
+    warning_days = get_early_warning_days(task.priority)
+
+    should_notify = False
+    notification_type = "STANDARD"
+
+    # Check if we're at a warning milestone
+    for warning_day in warning_days:
+        if days_until_due <= warning_day and days_until_due >= warning_day - 1:
+            should_notify = True
+            if warning_day == 0:
+                notification_type = "DUE_NOW"
+            elif warning_day <= 1:
+                notification_type = "URGENT"
+            elif warning_day <= 3:
+                notification_type = "WARNING"
+            else:
+                notification_type = "ADVANCE_NOTICE"
+            break
+
+    # Overdue = Critical alert
+    if days_until_due < 0:
+        should_notify = True
+        notification_type = "CRITICAL_OVERDUE"
+
+    return should_notify, notification_type
+
+
+# ---------------------- Task Logic ---------------------- #
+def send_notification(task, notification_type="STANDARD"):
+    urgency_icons = {
+        "CRITICAL_OVERDUE": "🚨🚨🚨",
+        "DUE_NOW": "⏰🔴",
+        "URGENT": "⚠️🔶",
+        "WARNING": "⚠️",
+        "ADVANCE_NOTICE": "📢",
+        "STANDARD": "🔔"
+    }
+
+    icon = urgency_icons.get(notification_type, "🔔")
+    timestamp = datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')
+
+    print(f"[{timestamp}] {icon} {notification_type}: '{task.description}' "
+          f"(Priority {task.priority}) - Due: {task.due_date.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if notification_type != "CRITICAL_OVERDUE":
+        task.completed = True
+
+
+def check_and_notify(tasks):
+    """
+    Enhanced notification system with priority-based triggers
+    """
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    updated = False
+
+    # Calculate urgency scores for all tasks
+    task_urgency = []
+    for task in tasks:
+        if not task.completed:
+            urgency_score = calculate_task_urgency_score(task, now)
+            compound_priority = calculate_compound_priority(task, now)
+            should_notify, notification_type = apply_risk_adjusted_notification(task, now)
+
+            task_urgency.append({
+                'task': task,
+                'urgency_score': urgency_score,
+                'compound_priority': compound_priority,
+                'should_notify': should_notify,
+                'notification_type': notification_type
+            })
+
+    # Sort by urgency score (most urgent first)
+    task_urgency.sort(key=lambda x: x['urgency_score'], reverse=True)
+
+    # Process notifications
+    for item in task_urgency:
+        task = item['task']
+        if item['should_notify']:
+            send_notification(task, item['notification_type'])
+
+            # Handle recurring tasks
+            if task.recurrence_days and item['notification_type'] in ['DUE_NOW', 'CRITICAL_OVERDUE']:
+                task.due_date += timedelta(days=task.recurrence_days)
+                task.completed = False
+
+            updated = True
+
+    if updated:
+        save_tasks_to_csv(tasks, "financial_tasks.csv")
+
+
+# ---------------------- Modern Button Class ---------------------- #
+class ModernButton(tk.Canvas):
+    def __init__(self, parent, text, command, bg_color="#4A90E2", fg_color="white",
+                 hover_color="#357ABD", width=140, height=40):
+        super().__init__(parent, width=width, height=height, bg=parent['bg'],
+                         highlightthickness=0, cursor="hand2")
+        self.command = command
+        self.bg_color = bg_color
+        self.hover_color = hover_color
+        self.fg_color = fg_color
+        self.text = text
+
+        self.rect = self.create_rectangle(0, 0, width, height, fill=bg_color,
+                                          outline="", tags="btn")
+        self.text_id = self.create_text(width / 2, height / 2, text=text,
+                                        fill=fg_color, font=("Segoe UI", 10, "bold"))
+
+        self.bind("<Enter>", self.on_enter)
+        self.bind("<Leave>", self.on_leave)
+        self.bind("<Button-1>", self.on_click)
+
+    def on_enter(self, e):
+        self.itemconfig(self.rect, fill=self.hover_color)
+
+    def on_leave(self, e):
+        self.itemconfig(self.rect, fill=self.bg_color)
+
+    def on_click(self, e):
+        self.command()
+
+
+# ---------------------- Tkinter UI ---------------------- #
+class FinancialTaskApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Financial Task Scheduler")
+        self.root.geometry("1000x650")
+
+        # Modern color scheme
+        self.bg_primary = "#1E1E2E"
+        self.bg_secondary = "#2A2A3E"
+        self.accent_color = "#6C5CE7"
+        self.success_color = "#00B894"
+        self.warning_color = "#FDCB6E"
+        self.danger_color = "#E17055"
+        self.text_color = "#FFFFFF"
+
+        self.root.config(bg=self.bg_primary)
+
+        self.tasks = []
+        self.file_path = "financial_tasks.csv"
+
+        self.create_widgets()
+        if os.path.exists(self.file_path):
+            self.tasks = load_tasks_from_csv(self.file_path)
+            self.refresh_table()
+
+        self.start_scheduler()
+        self.update_stats()
+
+    def create_widgets(self):
+        # Header Frame with gradient effect
+        header_frame = tk.Frame(self.root, bg=self.bg_secondary, height=100)
+        header_frame.pack(fill="x", pady=0)
+        header_frame.pack_propagate(False)
+
+        # Title with icon
+        title_frame = tk.Frame(header_frame, bg=self.bg_secondary)
+        title_frame.pack(expand=True)
+
+        icon_label = tk.Label(title_frame, text="💰", font=("Segoe UI", 40),
+                              bg=self.bg_secondary, fg=self.accent_color)
+        icon_label.pack(side="left", padx=10)
+
+        title_text = tk.Label(title_frame, text="Financial Task Scheduler",
+                              font=("Segoe UI", 28, "bold"), bg=self.bg_secondary,
+                              fg=self.text_color)
+        title_text.pack(side="left")
+
+        subtitle = tk.Label(header_frame, text="Manage your financial tasks efficiently",
+                            font=("Segoe UI", 11), bg=self.bg_secondary,
+                            fg="#A0A0B0")
+        subtitle.pack()
+
+        # Stats Dashboard
+        stats_frame = tk.Frame(self.root, bg=self.bg_primary)
+        stats_frame.pack(fill="x", padx=20, pady=15)
+
+        self.stat_cards = {}
+        stats = [
+            ("Total Tasks", "0", self.accent_color),
+            ("Completed", "0", self.success_color),
+            ("Pending", "0", self.warning_color),
+            ("Overdue", "0", self.danger_color)
+        ]
+
+        for i, (label, value, color) in enumerate(stats):
+            card = self.create_stat_card(stats_frame, label, value, color)
+            card.pack(side="left", expand=True, fill="both", padx=5)
+            self.stat_cards[label] = card
+
+        # Main Content Frame
+        content_frame = tk.Frame(self.root, bg=self.bg_primary)
+        content_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Table Frame with modern styling
+        table_frame = tk.Frame(content_frame, bg=self.bg_secondary, bd=0)
+        table_frame.pack(fill="both", expand=True)
+
+        # Configure custom style for treeview
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        style.configure("Custom.Treeview",
+                        background=self.bg_secondary,
+                        foreground=self.text_color,
+                        fieldbackground=self.bg_secondary,
+                        borderwidth=0,
+                        font=("Segoe UI", 10))
+
+        style.configure("Custom.Treeview.Heading",
+                        background=self.bg_primary,
+                        foreground=self.text_color,
+                        borderwidth=0,
+                        font=("Segoe UI", 11, "bold"))
+
+        style.map("Custom.Treeview",
+                  background=[("selected", self.accent_color)])
+
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(table_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        columns = ("ID", "Description", "Due Date", "Priority", "Recurrence", "Status")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
+                                 style="Custom.Treeview", yscrollcommand=scrollbar.set)
+
+        scrollbar.config(command=self.tree.yview)
+
+        # Column configuration
+        col_widths = {"ID": 60, "Description": 300, "Due Date": 160,
+                      "Priority": 80, "Recurrence": 100, "Status": 100}
+
+        for col in columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=col_widths.get(col, 120), anchor="center" if col == "ID" else "w")
+
+        self.tree.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # Action Buttons Frame
+        btn_frame = tk.Frame(self.root, bg=self.bg_primary)
+        btn_frame.pack(pady=15)
+
+        buttons = [
+            ("📥 Import", self.import_csv, self.accent_color, "#5B4DC7"),
+            ("💾 Export", self.export_csv, self.accent_color, "#5B4DC7"),
+            ("✅ Complete", self.mark_completed, self.success_color, "#00A07A"),
+            ("⚠️ Priority", self.show_priority_window, self.warning_color, "#E3B84E"),
+            ("🔄 Refresh", self.refresh_table, self.bg_secondary, "#3A3A4E"),
+        ]
+
+        for text, cmd, bg, hover in buttons:
+            btn = ModernButton(btn_frame, text, cmd, bg_color=bg, hover_color=hover, width=120, height=38)
+            btn.pack(side="left", padx=8)
+
+        # Footer with live clock
+        self.footer = tk.Label(self.root, text="", font=("Segoe UI", 9),
+                               bg=self.bg_primary, fg="#808090")
+        self.footer.pack(pady=5)
+        self.update_clock()
+
+    def create_stat_card(self, parent, label, value, color):
+        card = tk.Frame(parent, bg=self.bg_secondary, bd=0, relief="flat")
+
+        # Add subtle border effect
+        border = tk.Frame(card, bg=color, height=4)
+        border.pack(fill="x")
+
+        content = tk.Frame(card, bg=self.bg_secondary)
+        content.pack(fill="both", expand=True, padx=15, pady=15)
+
+        value_label = tk.Label(content, text=value, font=("Segoe UI", 24, "bold"),
+                               bg=self.bg_secondary, fg=color)
+        value_label.pack()
+        setattr(card, 'value_label', value_label)
+
+        label_text = tk.Label(content, text=label, font=("Segoe UI", 10),
+                              bg=self.bg_secondary, fg="#A0A0B0")
+        label_text.pack()
+
+        return card
+
+    def update_stats(self):
+        total = len(self.tasks)
+        completed = sum(1 for t in self.tasks if t.completed)
+        pending = sum(1 for t in self.tasks if not t.completed)
+        now = datetime.now(pytz.timezone(TIMEZONE))
+        overdue = sum(1 for t in self.tasks if not t.completed and t.due_date < now)
+
+        self.stat_cards["Total Tasks"].value_label.config(text=str(total))
+        self.stat_cards["Completed"].value_label.config(text=str(completed))
+        self.stat_cards["Pending"].value_label.config(text=str(pending))
+        self.stat_cards["Overdue"].value_label.config(text=str(overdue))
+
+    def update_clock(self):
+        now = datetime.now(pytz.timezone(TIMEZONE))
+        time_str = now.strftime("📅 %A, %B %d, %Y  •  🕐 %I:%M:%S %p")
+        self.footer.config(text=time_str)
+        self.root.after(1000, self.update_clock)
+
+    # -------------------- Button Actions -------------------- #
+    def import_csv(self):
+        file_path = filedialog.askopenfilename(
+            title="Select CSV file",
+            filetypes=[("CSV Files", "*.csv")]
+        )
+        if file_path:
+            self.file_path = file_path
+            self.tasks = load_tasks_from_csv(file_path)
+            self.refresh_table()
+            self.update_stats()
+            messagebox.showinfo("Success", f"✅ Tasks imported from {os.path.basename(file_path)}")
+
+    def export_csv(self):
+        file_path = filedialog.asksaveasfilename(
+            title="Save CSV File As",
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv")]
+        )
+        if file_path:
+            save_tasks_to_csv(self.tasks, file_path)
+            messagebox.showinfo("Success", f"✅ Tasks exported to {os.path.basename(file_path)}")
+
+    def refresh_table(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+
+        now = datetime.now(pytz.timezone(TIMEZONE))
+
+        for t in self.tasks:
+            # Color-code based on status
+            status = "✅ Done" if t.completed else "⏳ Pending"
+            if not t.completed and t.due_date < now:
+                status = "🔴 Overdue"
+
+            priority_text = f"P{t.priority}"
+            recurrence = f"{t.recurrence_days}d" if t.recurrence_days else "-"
+
+            self.tree.insert("", "end", values=(
+                t.task_id,
+                t.description,
+                t.due_date.strftime("%Y-%m-%d %H:%M"),
+                priority_text,
+                recurrence,
+                status
+            ), tags=(status,))
+
+        # Configure row colors
+        self.tree.tag_configure("✅ Done", foreground=self.success_color)
+        self.tree.tag_configure("🔴 Overdue", foreground=self.danger_color)
+        self.tree.tag_configure("⏳ Pending", foreground=self.warning_color)
+
+        self.update_stats()
+
+    def mark_completed(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Warning", "⚠️ Please select a task to mark as completed.")
+            return
+        task_id = int(self.tree.item(selected[0])['values'][0])
+        for t in self.tasks:
+            if t.task_id == task_id:
+                t.completed = True
+        save_tasks_to_csv(self.tasks, self.file_path)
+        self.refresh_table()
+        messagebox.showinfo("Success", "✅ Task marked as completed!")
+
+    def show_priority_window(self):
+        now = datetime.now(pytz.timezone(TIMEZONE))
+        due_soon = [t for t in self.tasks if t.priority == 1 and (t.due_date - now).days <= 3 and not t.completed]
+
+        win = tk.Toplevel(self.root)
+        win.title("⚠️ High Priority Tasks")
+        win.geometry("800x450")
+        win.config(bg=self.bg_primary)
+
+        # Header
+        header = tk.Frame(win, bg=self.warning_color, height=80)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        tk.Label(header, text="⚠️", font=("Segoe UI", 36),
+                 bg=self.warning_color).pack(pady=5)
+        tk.Label(header, text="High Priority Tasks (Due in 3 Days)",
+                 font=("Segoe UI", 16, "bold"), bg=self.warning_color).pack()
+
+        # Table
+        table_frame = tk.Frame(win, bg=self.bg_secondary)
+        table_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        cols = ("ID", "Description", "Due Date", "Days Left")
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings", style="Custom.Treeview")
+
+        for col in cols:
+            tree.heading(col, text=col)
+            width = 60 if col == "ID" else 100 if col == "Days Left" else 300
+            tree.column(col, width=width)
+
+        tree.pack(fill="both", expand=True)
+
+        for t in due_soon:
+            days_left = (t.due_date - now).days
+            tree.insert("", "end", values=(
+                t.task_id,
+                t.description,
+                t.due_date.strftime("%Y-%m-%d %H:%M"),
+                f"{days_left} days"
+            ))
+
+        if not due_soon:
+            tk.Label(win, text="🎉 No urgent tasks due in 3 days!",
+                     bg=self.bg_primary, fg=self.success_color,
+                     font=("Segoe UI", 14, "bold")).pack(pady=40)
+
+    # -------------------- Background Scheduler -------------------- #
+    def start_scheduler(self):
+        def run_scheduler():
+            schedule.every(60).seconds.do(check_and_notify, tasks=self.tasks)
+            while True:
+                schedule.run_pending()
+                time.sleep(1)
+
+        threading.Thread(target=run_scheduler, daemon=True).start()
+
+
+# ---------------------- Run the App ---------------------- #
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = FinancialTaskApp(root)
+    root.mainloop()
