@@ -41,7 +41,7 @@ class FinancialTask:
         return task
 
 
-# ---------------------- File Operations ---------------------- #
+#  File Operations #
 def load_tasks_from_csv(file_path):
     tasks = []
     if not os.path.exists(file_path):
@@ -64,7 +64,7 @@ def save_tasks_to_csv(tasks, file_path):
             writer.writerow(t.to_dict())
 
 
-# ---------------------- Financial Priority Concepts ---------------------- #
+#  Financial Priority Concepts  #
 def calculate_task_urgency_score(task, now):
     """
     Calculate urgency score using Time Value of Money concept
@@ -156,7 +156,7 @@ def apply_risk_adjusted_notification(task, now):
     return should_notify, notification_type
 
 
-# ---------------------- Task Logic ---------------------- #
+#  Task Logic  #
 def send_notification(task, notification_type="STANDARD"):
     urgency_icons = {
         "CRITICAL_OVERDUE": "🚨🚨🚨",
@@ -220,7 +220,7 @@ def check_and_notify(tasks):
         save_tasks_to_csv(tasks, "financial_tasks.csv")
 
 
-# ---------------------- Modern Button Class ---------------------- #
+#  Modern Button Class  #
 class ModernButton(tk.Canvas):
     def __init__(self, parent, text, command, bg_color="#4A90E2", fg_color="white",
                  hover_color="#357ABD", width=140, height=40):
@@ -251,7 +251,7 @@ class ModernButton(tk.Canvas):
         self.command()
 
 
-# ---------------------- Tkinter UI ---------------------- #
+#  Tkinter UI  #
 class FinancialTaskApp:
     def __init__(self, root):
         self.root = root
@@ -430,7 +430,7 @@ class FinancialTaskApp:
         self.footer.config(text=time_str)
         self.root.after(1000, self.update_clock)
 
-    # -------------------- Button Actions -------------------- #
+    #  Button Actions  #
     def import_csv(self):
         file_path = filedialog.askopenfilename(
             title="Select CSV file",
@@ -544,7 +544,7 @@ class FinancialTaskApp:
                      bg=self.bg_primary, fg=self.success_color,
                      font=("Segoe UI", 14, "bold")).pack(pady=40)
 
-    # -------------------- Background Scheduler -------------------- #
+    #  Background Scheduler #
     def start_scheduler(self):
         def run_scheduler():
             schedule.every(60).seconds.do(check_and_notify, tasks=self.tasks)
@@ -555,7 +555,7 @@ class FinancialTaskApp:
         threading.Thread(target=run_scheduler, daemon=True).start()
 
 
-# ---------------------- Run the App ---------------------- #
+#  Run the App  #
 if __name__ == "__main__":
     root = tk.Tk()
     app = FinancialTaskApp(root)
