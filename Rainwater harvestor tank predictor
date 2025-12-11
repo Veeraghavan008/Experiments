@@ -1,0 +1,324 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# Sample data as before...
+
+rainfall_data = {
+    "Delhi": 800,
+    "Chennai": 1400,
+    "Mumbai": 2200,
+    "Bengaluru": 970,
+    "Kolkata": 1750,
+}
+
+groundwater_data = {
+    "Delhi": 25,
+    "Chennai": 20,
+    "Mumbai": 15,
+    "Bengaluru": 30,
+    "Kolkata": 18,
+}
+
+roof_coefficients_base = {
+    "RCC": 0.9,
+    "Tiles": 0.8,
+    "Metal": 0.85,
+}
+
+# Cost constants (INR)...
+
+cost_per_cubic_meter = 500
+filtration_cost = 15000
+fixing_cost = 7000
+maintenance_pct = 0.1
+water_price_per_m3 = 30
+co2_per_m3 = 0.5
+
+# Monthly rainfall distribution...
+
+monthly_rainfall_pct = {
+    "Jan": 0.01, "Feb": 0.01, "Mar": 0.02, "Apr": 0.03,
+    "May": 0.07, "Jun": 0.18, "Jul": 0.25, "Aug": 0.20,
+    "Sep": 0.15, "Oct": 0.05, "Nov": 0.02, "Dec": 0.01,
+}
+months = list(monthly_rainfall_pct.keys())
+
+# In-memory user database (username: password)
+user_db = {"admin": "password"}
+
+
+def recommend_structure(depth):
+    if depth > 25:
+        return "Recharge well/trench, Shaft, Percolation tank"
+    elif 15 < depth <= 25:
+        return "Recharge pit, Open/Bore well recharge"
+    else:
+        return "Recharge pit, Dug/Abandoned well"
+
+
+def adjust_runoff_for_slope(base_coeff, slope_deg):
+    if slope_deg < 5:
+        return base_coeff * 0.8
+    elif slope_deg > 40:
+        return min(base_coeff * 1.05, 1.0)
+    else:
+        return base_coeff
+
+
+def calculate_and_plot():
+    try:
+        city = city_var.get()
+        roof_area = float(roof_area_var.get())
+        open_space = float(open_space_var.get())
+        roof_type = roof_type_var.get()
+        pit_depth = float(pit_depth_var.get())
+        slope_deg = float(slope_var.get())
+
+        base_runoff_coeff = roof_coefficients_base[roof_type]
+        runoff_coeff = adjust_runoff_for_slope(base_runoff_coeff, slope_deg)
+
+        rainfall_m = rainfall_data[city] / 1000
+        runoff_volume = roof_area * rainfall_m * runoff_coeff
+
+        max_storage_volume = open_space * pit_depth
+        stored_volume = min(runoff_volume * 0.5, max_storage_volume)
+        pit_side = (stored_volume / pit_depth) ** 0.5 if pit_depth > 0 else 0
+        base_storage_cost = stored_volume * cost_per_cubic_meter
+
+        total_installation_cost = base_storage_cost + filtration_cost + fixing_cost
+
+        groundwater_recharge = stored_volume * 0.7
+        overflow_volume = max(runoff_volume * 0.5 - max_storage_volume, 0)
+        trees_possible = int(stored_volume)
+        co2_saved = stored_volume * co2_per_m3
+
+        maintenance_cost = total_installation_cost * maintenance_pct
+        annual_water_saving = stored_volume * water_price_per_m3
+        net_annual_saving = annual_water_saving - maintenance_cost
+        payback_period = total_installation_cost / net_annual_saving if net_annual_saving > 0 else float('inf')
+
+        depth_to_water = groundwater_data[city]
+        structure_suggestion = recommend_structure(depth_to_water)
+
+        result_text = f"""
+City: {city}
+Roof Slope: {slope_deg}°
+Adjusted Runoff Coefficient: {runoff_coeff:.3f}
+Annual Runoff Volume: {runoff_volume:.2f} m³/year
+Potential Stored Volume: {stored_volume:.2f} m³
+Suggested Pit Dimensions: {pit_side:.2f} m x {pit_side:.2f} m x {pit_depth} m
+
+Costs:
+ - Base Storage Cost: ₹ {base_storage_cost:,.2f}
+ - Filtration Cost: ₹ {filtration_cost:,.2f}
+ - Fixing Cost: ₹ {fixing_cost:,.2f}
+ - Total Installation Cost: ₹ {total_installation_cost:,.2f}
+ - Estimated Annual Maintenance Cost: ₹ {maintenance_cost:,.2f}
+
+Savings and Benefits:
+ - Estimated Annual Water Savings: ₹ {annual_water_saving:,.2f}
+ - Estimated Payback Period: {"{:.1f} years".format(payback_period) if payback_period != float('inf') else "Not achievable"}
+ - Groundwater Recharge Contribution: {groundwater_recharge:.2f} m³/year
+ - Overflow Volume (if any): {overflow_volume:.2f} m³/year
+ - Potential Trees Supported: {trees_possible}
+ - Estimated Carbon Footprint Saved: {co2_saved:.2f} kg CO₂/year
+ - Recommended Recharge Structure: {structure_suggestion}
+"""
+        result_box.delete(1.0, tk.END)
+        result_box.insert(tk.END, result_text)
+
+        monthly_overflow = []
+        monthly_cost_savings = []
+
+        for month in months:
+            monthly_runoff = roof_area * (rainfall_data[city] / 1000) * runoff_coeff * monthly_rainfall_pct[month]
+            monthly_stored = min(monthly_runoff * 0.5, max_storage_volume)
+            monthly_of = max(monthly_runoff * 0.5 - max_storage_volume, 0)
+            monthly_overflow.append(monthly_of)
+            monthly_cost_savings.append(monthly_stored * water_price_per_m3)
+
+        for widget in plot_frame.winfo_children():
+            widget.destroy()
+
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+        ax2 = ax1.twinx()
+        ax1.bar(months, monthly_overflow, color='orange', alpha=0.6, label='Monthly Overflow (m³)')
+        ax2.plot(months, monthly_cost_savings, color='blue', marker='o', label='Monthly Cost Savings (₹)')
+        ax1.set_xlabel('Month')
+        ax1.set_ylabel('Overflow Volume (m³)', color='orange')
+        ax2.set_ylabel('Cost Savings (₹)', color='blue')
+        ax1.tick_params(axis='y', labelcolor='orange')
+        ax2.tick_params(axis='y', labelcolor='blue')
+        ax1.legend(loc='upper left')
+        ax2.legend(loc='upper right')
+        plt.title(f"Monthly Overflow Volume and Cost Savings in {city}")
+        plt.xticks(rotation=45)
+        plt.grid(True)
+
+        canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+
+def login():
+    username = username_var.get()
+    password = password_var.get()
+    if username in user_db and user_db[username] == password:
+        login_window.destroy()
+        root.deiconify()
+    else:
+        messagebox.showerror("Login Failed", "Invalid username or password")
+
+
+def open_register_window():
+    def register_user():
+        new_username = reg_username_var.get().strip()
+        new_password = reg_password_var.get()
+        confirm_password = reg_confirm_password_var.get()
+
+        if not new_username or not new_password:
+            messagebox.showwarning("Input Error", "Username and password cannot be empty.")
+            return
+        if new_username in user_db:
+            messagebox.showwarning("Registration Error", "Username already exists.")
+            return
+        if new_password != confirm_password:
+            messagebox.showwarning("Registration Error", "Passwords do not match.")
+            return
+        user_db[new_username] = new_password
+        messagebox.showinfo("Success", "Registration successful! You can now login.")
+        register_window.destroy()
+
+    register_window = tk.Toplevel(root)
+    register_window.title("Register")
+    register_window.geometry("350x220")
+    register_window.configure(bg='sky blue')
+
+    register_frame = ttk.Frame(register_window, padding=20, style='SkyBlue.TFrame')
+    register_frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(register_frame, text="New Username:", style='SkyBlue.TLabel').grid(row=0, column=0, sticky=tk.W,
+                                                                                 pady=(0, 10))
+    ttk.Label(register_frame, text="New Password:", style='SkyBlue.TLabel').grid(row=1, column=0, sticky=tk.W,
+                                                                                 pady=(0, 10))
+    ttk.Label(register_frame, text="Confirm Password:", style='SkyBlue.TLabel').grid(row=2, column=0, sticky=tk.W,
+                                                                                     pady=(0, 10))
+
+    reg_username_var = tk.StringVar()
+    reg_password_var = tk.StringVar()
+    reg_confirm_password_var = tk.StringVar()
+
+    ttk.Entry(register_frame, textvariable=reg_username_var, style='SkyBlue.TEntry', width=30).grid(row=0, column=1,
+                                                                                                    pady=(0, 10))
+    ttk.Entry(register_frame, textvariable=reg_password_var, style='SkyBlue.TEntry', show='*', width=30).grid(row=1,
+                                                                                                              column=1,
+                                                                                                              pady=(0,
+                                                                                                                    10))
+    ttk.Entry(register_frame, textvariable=reg_confirm_password_var, style='SkyBlue.TEntry', show='*', width=30).grid(
+        row=2, column=1, pady=(0, 10))
+
+    ttk.Button(register_frame, text="Register", command=register_user, style='NavyBlue.TButton').grid(row=3, column=0,
+                                                                                                      columnspan=2,
+                                                                                                      pady=15)
+
+
+# Initialize Main Window
+root = tk.Tk()
+root.title("H2Optimize with Roof Slope & Detailed Costs")
+root.geometry("800x800")
+root.configure(bg='sky blue')
+root.withdraw()
+
+# Styling Configuration
+style = ttk.Style()
+style.theme_use('clam')
+
+style.configure('SkyBlue.TFrame', background='sky blue')
+style.configure('SkyBlue.TLabel', background='sky blue', foreground='black')
+style.configure('SkyBlue.TEntry', fieldbackground='white')
+style.configure('SkyBlue.TCombobox', fieldbackground='white', background='sky blue')
+
+style.configure('NavyBlue.TButton',
+                background='navy blue',
+                foreground='white',
+                font=('Helvetica', 10, 'bold'),
+                borderwidth=1,
+                relief='raised')
+style.map('NavyBlue.TButton',
+          background=[('active', 'dark blue')])
+
+# Login Window setup
+login_window = tk.Toplevel(root)
+login_window.title("Login")
+login_window.geometry("400x220")
+login_window.configure(bg='sky blue')
+
+login_frame = ttk.Frame(login_window, padding=20, style='SkyBlue.TFrame')
+login_frame.pack(fill=tk.BOTH, expand=True)
+
+username_var = tk.StringVar()
+password_var = tk.StringVar()
+
+ttk.Label(login_frame, text="Username:", style='SkyBlue.TLabel').grid(row=0, column=0, sticky=tk.W, pady=10)
+ttk.Entry(login_frame, textvariable=username_var, style='SkyBlue.TEntry', width=30).grid(row=0, column=1, pady=10)
+
+ttk.Label(login_frame, text="Password:", style='SkyBlue.TLabel').grid(row=1, column=0, sticky=tk.W, pady=10)
+ttk.Entry(login_frame, textvariable=password_var, style='SkyBlue.TEntry', show='*', width=30).grid(row=1, column=1,
+                                                                                                   pady=10)
+
+ttk.Button(login_frame, text="Login", command=login, style='NavyBlue.TButton').grid(row=2, column=0, columnspan=2,
+                                                                                    pady=15)
+
+ttk.Button(login_frame, text="Register", command=open_register_window, style='NavyBlue.TButton').grid(row=3, column=0,
+                                                                                                      columnspan=2)
+
+# Main Application Frame
+frame = ttk.Frame(root, padding=15, style='SkyBlue.TFrame')
+frame.pack(fill=tk.BOTH, expand=True)
+
+ttk.Label(frame, text="Select City:", style='SkyBlue.TLabel').grid(row=0, column=0, sticky=tk.W, pady=2)
+city_var = tk.StringVar(value="Mumbai")
+city_menu = ttk.Combobox(frame, textvariable=city_var, values=list(rainfall_data.keys()), state="readonly",
+                         style='SkyBlue.TCombobox')
+city_menu.grid(row=0, column=1, sticky=tk.EW, pady=2)
+
+ttk.Label(frame, text="Roof Area (m²):", style='SkyBlue.TLabel').grid(row=1, column=0, sticky=tk.W, pady=2)
+roof_area_var = tk.StringVar(value="100")
+ttk.Entry(frame, textvariable=roof_area_var, style='SkyBlue.TEntry').grid(row=1, column=1, sticky=tk.EW, pady=2)
+
+ttk.Label(frame, text="Open Space (m²):", style='SkyBlue.TLabel').grid(row=2, column=0, sticky=tk.W, pady=2)
+open_space_var = tk.StringVar(value="50")
+ttk.Entry(frame, textvariable=open_space_var, style='SkyBlue.TEntry').grid(row=2, column=1, sticky=tk.EW, pady=2)
+
+ttk.Label(frame, text="Roof Type:", style='SkyBlue.TLabel').grid(row=3, column=0, sticky=tk.W, pady=2)
+roof_type_var = tk.StringVar(value="RCC")
+roof_type_menu = ttk.Combobox(frame, textvariable=roof_type_var, values=list(roof_coefficients_base.keys()),
+                              state="readonly", style='SkyBlue.TCombobox')
+roof_type_menu.grid(row=3, column=1, sticky=tk.EW, pady=2)
+
+ttk.Label(frame, text="Pit Depth (m):", style='SkyBlue.TLabel').grid(row=4, column=0, sticky=tk.W, pady=2)
+pit_depth_var = tk.StringVar(value="2.0")
+ttk.Entry(frame, textvariable=pit_depth_var, style='SkyBlue.TEntry').grid(row=4, column=1, sticky=tk.EW, pady=2)
+
+ttk.Label(frame, text="Roof Slope (degrees):", style='SkyBlue.TLabel').grid(row=5, column=0, sticky=tk.W, pady=2)
+slope_var = tk.StringVar(value="15")
+ttk.Entry(frame, textvariable=slope_var, style='SkyBlue.TEntry').grid(row=5, column=1, sticky=tk.EW, pady=2)
+
+ttk.Button(frame, text="Calculate", command=calculate_and_plot, style='NavyBlue.TButton').grid(row=6, column=0,
+                                                                                               columnspan=2, pady=15)
+
+result_box = tk.Text(frame, width=70, height=20, bg='light blue', fg='black', font=('Courier New', 10))
+result_box.grid(row=7, column=0, columnspan=2, pady=10, sticky=tk.NSEW)
+
+plot_frame = ttk.Frame(root, style='SkyBlue.TFrame')
+plot_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+
+frame.grid_rowconfigure(7, weight=1)
+frame.grid_columnconfigure(1, weight=1)
+
+root.mainloop()
