@@ -1,0 +1,95 @@
+import pandas as pd
+import numpy as np
+import zipfile
+import os
+from datetime import datetime
+
+print("🚀 UIDAI Hackathon Data Preprocessor")
+
+# ===== SUBSTITUTE YOUR 3 ZIP FILENAMES HERE =====
+ZIP1 = "C:\\Users\\Vrushabh\\Downloads\\api_data_aadhar_demographic.zip" # ← CHANGE THIS
+ZIP2 = "C:\\Users\\Vrushabh\\Downloads\\api_data_aadhar_enrolment.zip" # ← CHANGE THIS
+ZIP3 = "C:\\Users\\Vrushabh\\Downloads\\api_data_aadhar_biometric.zip"  # ← CHANGE THIS
+
+zip_files = [ZIP1, ZIP2, ZIP3]
+print(f"📦 Processing: {zip_files}")
+
+# Step 1: Load ALL CSVs from each ZIP
+all_dfs = []
+
+for zip_idx, zip_path in enumerate(zip_files):
+    print(f"\n📂 ZIP {zip_idx + 1}: {zip_path}")
+
+    if not os.path.exists(zip_path):
+        print(f"❌ {zip_path} NOT FOUND!")
+        continue
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        csv_files = [f for f in zf.namelist() if f.lower().endswith('.csv')]
+        print(f"   Found {len(csv_files)} CSVs")
+
+        for csv_name in csv_files:
+            try:
+                df = pd.read_csv(zf.open(csv_name))
+                df['source_zip'] = zip_path
+                df['source_csv'] = csv_name
+                all_dfs.append(df)
+                print(f"   ✅ {csv_name}: {df.shape}")
+            except Exception as e:
+                print(f"   ❌ {csv_name}: {e}")
+
+print(f"\n🎉 Total {len(all_dfs)} CSVs loaded!")
+
+
+# Step 2: UIDAI Cleaning Function
+def clean_uidai_df(df):
+    # Remove duplicates and bad rows
+    df = df.drop_duplicates()
+    df = df.dropna(thresh=len(df.columns) // 2)
+
+    # Fill missing values
+    for col in df.select_dtypes(include=[np.number]).columns:
+        df[col] = df[col].fillna(0)
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].fillna(df[col].mode()[0] if len(df[col].mode()) > 0 else 'MISSING')
+
+    # Fix Indian dates (DD-MM-YYYY)
+    date_cols = [col for col in df.columns if any(x in col.lower() for x in ['date', 'transaction', 'enrol', 'update'])]
+    for col in date_cols:
+        df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+
+    # Clean strings
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].str.strip().str.upper()
+
+    return df
+
+
+# Clean all datasets
+clean_dfs = [clean_uidai_df(df) for df in all_dfs]
+
+# Step 3: SAFE COMBINE ALL DATA
+print("\n🔗 Combining ALL datasets...")
+final_df = pd.concat(clean_dfs, ignore_index=True)
+
+# Step 4: Sort by date if available
+date_col = None
+for col in final_df.columns:
+    if pd.api.types.is_datetime64_any_dtype(final_df[col]):
+        date_col = col
+        break
+
+if date_col:
+    final_df = final_df.sort_values(date_col).reset_index(drop=True)
+    print(f"📅 Sorted by: {date_col}")
+else:
+    print("📋 No date column found - data ready as-is")
+
+# Step 5: SAVE
+output_file = 'UIDAI_ALL_DATA_CLEANED.csv'
+final_df.to_csv(output_file, index=False)
+print(f"\n💾 SAVED: {output_file}")
+print(f"📊 Shape: {final_df.shape[0]:,} rows × {final_df.shape[1]} columns")
+
+print("\n✅ DONE! Check UIDAI_ALL_DATA_CLEANED.csv")
+print("Columns:", list(final_df.columns))
