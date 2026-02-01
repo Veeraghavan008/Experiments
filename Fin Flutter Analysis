@@ -1,0 +1,93 @@
+import math
+
+print("\n=== FIN AEROELASTIC ANALYSIS TOOL ===\n")
+
+# USER INPUTS
+
+# Young's Modulus (entered in GPa for sanity)
+E_GPa = float(input("Enter Young's Modulus of fin material (GPa): "))
+t = float(input("Enter fin thickness (meters): "))
+b = float(input("Enter fin semi-span (meters): "))
+
+c_root = float(input("Enter fin root chord (meters): "))
+c_tip = float(input("Enter fin tip chord (meters): "))
+N = int(input("Enter number of fins: "))
+
+rho = float(input("Enter air density at max velocity (kg/m^3): "))
+a = float(input("Enter speed of sound at that altitude (m/s): "))
+
+K = float(input("Enter flutter correction factor K (0.6–1.2 typical): "))
+V_max = float(input("Enter max flight velocity from OpenRocket (m/s): "))
+
+# CONVERSIONS 
+
+# Convert Young’s Modulus from GPa → Pa
+E = E_GPa * 1e9
+
+#CALCULATIONS
+
+# 1. Area moment of inertia (rectangular fin root section)
+I = (t**3 * b) / 12  # m^4
+
+# 2. Average chord
+c_avg = (c_root + c_tip) / 2
+
+# 3. Fin planform area (single fin)
+S_fin = c_avg * b
+
+# 4. Total fin area
+S_total = S_fin * N
+
+# NAR / TRIPOLI MODEL ROCKET FLUTTER
+
+aspect_correction = math.sqrt(c_root / b)
+
+V_flutter = (
+    K
+    * math.sqrt(E / rho)
+    * (t / b) ** 1.5
+    * aspect_correction
+)
+
+M_flutter = V_flutter / a
+
+
+
+# 7. Current Mach number
+current_mach = V_max / a
+
+# 8. Mach divergence (conservative limit)
+M_divergence = 0.8
+
+# 9. Lift slope per fin (Barrowman approx)
+CN_alpha_fin = (2 * math.pi * b**2) / S_fin
+
+# 10. Total lift slope
+CN_alpha_total = CN_alpha_fin * N
+
+# 11. Flutter safety margin
+flutter_margin = V_flutter / V_max
+
+# OUTPUT 
+
+print("\n------ RESULTS ------\n")
+print(f"Flutter Velocity        : {V_flutter:.2f} m/s")
+print(f"Flutter Mach Number     : {M_flutter:.2f}")
+print(f"Current Flight Mach     : {current_mach:.2f}")
+print(f"Mach Divergence Limit   : {M_divergence:.2f}")
+print(f"Lift Slope (CN_alpha)   : {CN_alpha_total:.2f} per rad")
+
+print("\n------ SAFETY STATUS ------\n")
+print(f"Flutter Safety Margin   : {flutter_margin:.2f}")
+
+if flutter_margin >= 1.5:
+    print("Flutter Status          : SAFE ✅")
+else:
+    print("Flutter Status          : NOT SAFE ❌")
+
+if current_mach < M_divergence:
+    print("Compressibility Status : SAFE ✅")
+else:
+    print("Compressibility Status : WARNING ⚠️")
+
+print("\n=== ANALYSIS COMPLETE ===\n")
