@@ -1,0 +1,33 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Beam properties
+L = int(input("Enter Length: "))            # length (m)
+P = int(input("Enter Point Load: "))            # point load (N)
+
+# Cross-section
+b = 0.05             # width (m)
+h = 0.1              # height (m)
+
+# Moment of inertia
+I = (b * h**3) / 12
+
+# Beam coordinates
+x = np.linspace(0, L, 200)
+
+# Bending moment for cantilever with end load
+M = P * (L - x)
+
+# Distance from neutral axis
+y = h / 2
+
+# Bending stress
+sigma = (M * y) / I
+
+# Plot
+plt.plot(x, sigma / 1e6)
+plt.xlabel("Beam Length (m)")
+plt.ylabel("Stress (MPa)")
+plt.title("Bending Stress Distribution")
+plt.grid(True)
+plt.show()
