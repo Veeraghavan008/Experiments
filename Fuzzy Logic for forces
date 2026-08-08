@@ -1,0 +1,504 @@
+# ============================================================
+# FUZZY AI ANALYSIS OF ROTATING MACHINE - EXPERIMENT 4
+# Predict:
+#   1. Force from voltage
+#   2. Machine condition / abnormality
+#
+# Required:
+#   pip install pandas numpy matplotlib scikit-fuzzy openpyxl scipy
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+from scipy.stats import kurtosis, skew
+from scipy.signal import welch
+import os
+
+# ============================================================
+# 1. LOAD EXCEL FILE
+# ============================================================
+
+FILE = "C:\\Users\\Vrushabh\\Downloads\\Ex4.xlsx"
+
+xls = pd.ExcelFile(FILE)
+
+print("Sheets available:")
+for s in xls.sheet_names:
+    print("  ", s)
+
+# Use one DAQ channel initially
+SHEET = xls.sheet_names[0]
+
+df = pd.read_excel(FILE, sheet_name=SHEET)
+
+print("\nUsing sheet:", SHEET)
+print("\nColumns:")
+print(df.columns.tolist())
+
+print("\nFirst 10 rows:")
+print(df.head(10))
+
+
+# ============================================================
+# 2. IDENTIFY TIME AND VOLTAGE COLUMNS
+# ============================================================
+
+# Change these if your Excel column names are different
+
+time_col = None
+voltage_col = None
+force_col = None
+
+for col in df.columns:
+    name = str(col).lower()
+
+    if "time" in name or "x_value" in name:
+        time_col = col
+
+    if "voltage" in name:
+        voltage_col = col
+
+    if "force" in name:
+        force_col = col
+
+print("\nDetected:")
+print("Time    :", time_col)
+print("Voltage :", voltage_col)
+print("Force   :", force_col)
+
+if voltage_col is None:
+    raise ValueError(
+        "Voltage column not found. Check the Excel column name."
+    )
+
+voltage = pd.to_numeric(df[voltage_col], errors="coerce")
+
+if time_col is not None:
+    time = pd.to_numeric(df[time_col], errors="coerce")
+else:
+    # Dataset appears to be sampled at 1 ms
+    time = np.arange(len(voltage)) / 1000.0
+
+# Remove invalid rows
+valid = voltage.notna()
+
+voltage = voltage[valid].reset_index(drop=True)
+time = time[valid].reset_index(drop=True)
+
+
+# ============================================================
+# 3. FORCE CALCULATION
+# ============================================================
+
+# IMPORTANT:
+# Do NOT assume 200 unless your sensor calibration says so.
+
+FORCE_CALIBRATION = 200.0   # N/V
+# Example:
+# If calibration is 100 N/V, change this to 100.
+# If you have actual measured force, use that instead.
+
+predicted_force = voltage * FORCE_CALIBRATION
+
+print("\nForce statistics:")
+print("Mean force :", predicted_force.mean(), "N")
+print("Std force  :", predicted_force.std(), "N")
+print("Min force  :", predicted_force.min(), "N")
+print("Max force  :", predicted_force.max(), "N")
+
+
+# ============================================================
+# 4. PLOT RAW VOLTAGE
+# ============================================================
+
+plt.figure(figsize=(12, 5))
+plt.plot(time, voltage)
+plt.xlabel("Time (s)")
+plt.ylabel("Voltage (V)")
+plt.title("Experiment 4 - Voltage Signal")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# 5. PLOT PREDICTED FORCE
+# ============================================================
+
+plt.figure(figsize=(12, 5))
+plt.plot(time, predicted_force)
+plt.xlabel("Time (s)")
+plt.ylabel("Predicted Force (N)")
+plt.title("Experiment 4 - Predicted Force")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# 6. FEATURE EXTRACTION
+# ============================================================
+
+def extract_features(signal):
+
+    signal = np.asarray(signal)
+
+    rms = np.sqrt(np.mean(signal ** 2))
+
+    peak = np.max(np.abs(signal))
+
+    std = np.std(signal)
+
+    mean = np.mean(signal)
+
+    sk = skew(signal)
+
+    kurt = kurtosis(signal)
+
+    if rms != 0:
+        crest_factor = peak / rms
+    else:
+        crest_factor = 0
+
+    return {
+        "Mean": mean,
+        "RMS": rms,
+        "Peak": peak,
+        "STD": std,
+        "Skewness": sk,
+        "Kurtosis": kurt,
+        "CrestFactor": crest_factor
+    }
+
+
+features = extract_features(voltage)
+
+print("\n===================================")
+print("EXPERIMENT 4 SIGNAL FEATURES")
+print("===================================")
+
+for key, value in features.items():
+    print(f"{key:15s}: {value:.6f}")
+
+
+# ============================================================
+# 7. FUZZY VARIABLES
+# ============================================================
+
+# RMS vibration/voltage
+rms_input = ctrl.Antecedent(
+    np.linspace(0, max(1, features["RMS"] * 2), 1000),
+    "RMS"
+)
+
+# Kurtosis
+kurt_input = ctrl.Antecedent(
+    np.linspace(0, max(5, features["Kurtosis"] * 2), 1000),
+    "Kurtosis"
+)
+
+# Crest factor
+crest_input = ctrl.Antecedent(
+    np.linspace(0, max(3, features["CrestFactor"] * 2), 1000),
+    "CrestFactor"
+)
+
+# Machine abnormality
+abnormality = ctrl.Consequent(
+    np.linspace(0, 100, 1000),
+    "Abnormality"
+)
+
+
+# ============================================================
+# 8. MEMBERSHIP FUNCTIONS
+# ============================================================
+
+# RMS
+
+rms_max = max(1, features["RMS"] * 2)
+
+rms_input["Low"] = fuzz.trimf(
+    rms_input.universe,
+    [0, 0, rms_max * 0.45]
+)
+
+rms_input["Medium"] = fuzz.trimf(
+    rms_input.universe,
+    [rms_max * 0.25,
+     rms_max * 0.5,
+     rms_max * 0.75]
+)
+
+rms_input["High"] = fuzz.trimf(
+    rms_input.universe,
+    [rms_max * 0.55,
+     rms_max,
+     rms_max]
+)
+
+
+# ============================================================
+# KURTOSIS MEMBERSHIP FUNCTIONS
+# ============================================================
+
+kmax = max(5, features["Kurtosis"] * 2)
+
+kurt_input["Low"] = fuzz.trimf(
+    kurt_input.universe,
+    [0, 0, kmax * 0.4]
+)
+
+kurt_input["Medium"] = fuzz.trimf(
+    kurt_input.universe,
+    [kmax * 0.2,
+     kmax * 0.5,
+     kmax * 0.8]
+)
+
+kurt_input["High"] = fuzz.trimf(
+    kurt_input.universe,
+    [kmax * 0.6,
+     kmax,
+     kmax]
+)
+
+
+# ============================================================
+# CREST FACTOR
+# ============================================================
+
+cmax = max(3, features["CrestFactor"] * 2)
+
+crest_input["Low"] = fuzz.trimf(
+    crest_input.universe,
+    [0, 0, cmax * 0.4]
+)
+
+crest_input["Medium"] = fuzz.trimf(
+    crest_input.universe,
+    [cmax * 0.2,
+     cmax * 0.5,
+     cmax * 0.8]
+)
+
+crest_input["High"] = fuzz.trimf(
+    crest_input.universe,
+    [cmax * 0.6,
+     cmax,
+     cmax]
+)
+
+
+# ============================================================
+# OUTPUT MEMBERSHIP FUNCTIONS
+# ============================================================
+
+abnormality["Normal"] = fuzz.trimf(
+    abnormality.universe,
+    [0, 0, 35]
+)
+
+abnormality["Warning"] = fuzz.trimf(
+    abnormality.universe,
+    [20, 50, 75]
+)
+
+abnormality["Fault"] = fuzz.trimf(
+    abnormality.universe,
+    [60, 100, 100]
+)
+
+
+# ============================================================
+# 9. FUZZY RULES
+# ============================================================
+
+rule1 = ctrl.Rule(
+    rms_input["Low"] &
+    kurt_input["Low"] &
+    crest_input["Low"],
+    abnormality["Normal"]
+)
+
+rule2 = ctrl.Rule(
+    rms_input["Medium"] &
+    kurt_input["Medium"],
+    abnormality["Warning"]
+)
+
+rule3 = ctrl.Rule(
+    rms_input["High"] &
+    kurt_input["High"],
+    abnormality["Fault"]
+)
+
+rule4 = ctrl.Rule(
+    rms_input["High"] &
+    crest_input["High"],
+    abnormality["Fault"]
+)
+
+rule5 = ctrl.Rule(
+    kurt_input["High"] &
+    crest_input["High"],
+    abnormality["Fault"]
+)
+
+rule6 = ctrl.Rule(
+    rms_input["Medium"] &
+    crest_input["High"],
+    abnormality["Warning"]
+)
+
+
+# ============================================================
+# 10. CREATE FUZZY SYSTEM
+# ============================================================
+
+system = ctrl.ControlSystem([
+    rule1,
+    rule2,
+    rule3,
+    rule4,
+    rule5,
+    rule6
+])
+
+simulation = ctrl.ControlSystemSimulation(system)
+
+
+# ============================================================
+# 11. RUN FUZZY PREDICTION
+# ============================================================
+
+simulation.input["RMS"] = features["RMS"]
+simulation.input["Kurtosis"] = features["Kurtosis"]
+simulation.input["CrestFactor"] = features["CrestFactor"]
+
+simulation.compute()
+
+score = simulation.output["Abnormality"]
+
+print("\n===================================")
+print("FUZZY AI RESULT")
+print("===================================")
+
+print(f"Abnormality score = {score:.2f} / 100")
+
+
+# ============================================================
+# 12. CLASSIFY MACHINE CONDITION
+# ============================================================
+
+if score < 35:
+    condition = "NORMAL"
+
+elif score < 65:
+    condition = "WARNING / POSSIBLE ANOMALY"
+
+else:
+    condition = "FAULT / HIGH ABNORMALITY"
+
+
+print("Predicted condition:", condition)
+
+
+# ============================================================
+# 13. MEMBERSHIP FUNCTION PLOTS
+# ============================================================
+
+rms_input.view()
+plt.title("Fuzzy Membership Functions - RMS")
+plt.show()
+
+kurt_input.view()
+plt.title("Fuzzy Membership Functions - Kurtosis")
+plt.show()
+
+crest_input.view()
+plt.title("Fuzzy Membership Functions - Crest Factor")
+plt.show()
+
+abnormality.view(sim=simulation)
+plt.title("Fuzzy Output - Machine Abnormality")
+plt.show()
+
+
+# ============================================================
+# 14. FREQUENCY DOMAIN ANALYSIS
+# ============================================================
+
+fs = 1000  # Hz
+
+frequencies, power = welch(
+    voltage,
+    fs=fs,
+    nperseg=min(2048, len(voltage))
+)
+
+dominant_frequency = frequencies[np.argmax(power)]
+
+print("\n===================================")
+print("FREQUENCY ANALYSIS")
+print("===================================")
+
+print(
+    f"Dominant frequency = "
+    f"{dominant_frequency:.2f} Hz"
+)
+
+
+plt.figure(figsize=(12, 5))
+plt.semilogy(frequencies, power)
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Power")
+plt.title("Experiment 4 - Frequency Spectrum")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# 15. SAVE RESULTS
+# ============================================================
+
+results = pd.DataFrame({
+    "Time": time,
+    "Voltage": voltage,
+    "Predicted_Force_N": predicted_force
+})
+
+results.to_csv(
+    "Ex4_fuzzy_predictions.csv",
+    index=False
+)
+
+summary = pd.DataFrame({
+    "Experiment": ["Ex4"],
+    "Mean_Voltage": [features["Mean"]],
+    "RMS": [features["RMS"]],
+    "Peak": [features["Peak"]],
+    "STD": [features["STD"]],
+    "Kurtosis": [features["Kurtosis"]],
+    "CrestFactor": [features["CrestFactor"]],
+    "Mean_Force_N": [predicted_force.mean()],
+    "RMS_Force_N": [
+        np.sqrt(np.mean(predicted_force ** 2))
+    ],
+    "Abnormality_Score": [score],
+    "Predicted_Condition": [condition],
+    "Dominant_Frequency_Hz": [dominant_frequency]
+})
+
+summary.to_csv(
+    "Ex4_fuzzy_summary.csv",
+    index=False
+)
+
+print("\nResults saved:")
+print("Ex4_fuzzy_predictions.csv")
+print("Ex4_fuzzy_summary.csv")
