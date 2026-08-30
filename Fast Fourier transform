@@ -1,0 +1,746 @@
+import pandas as pd
+import numpy as np
+import os
+
+# ============================================================
+# 1. EXPERIMENT FILES
+# ============================================================
+
+files = [
+"C:\\Users\\Vrushabh\\Downloads\\ex2.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\Ex3.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\Ex40.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\Ex5.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\Ex6.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\Ex7.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\Ex8.xlsx",
+"C:\\Users\\Vrushabh\\Downloads\\ex9.xlsx"
+]
+
+
+# ============================================================
+# 2. MASTER RESULTS
+# ============================================================
+
+all_results = []
+
+
+# ============================================================
+# 3. PROCESS EVERY EXPERIMENT
+# ============================================================
+
+for file in files:
+
+    # Check whether file exists
+    if not os.path.exists(file):
+
+        print("\nFILE NOT FOUND:")
+        print(file)
+
+        continue
+
+
+    # Experiment name
+    experiment_name = os.path.splitext(
+        os.path.basename(file)
+    )[0]
+
+
+    print("\n")
+    print("=" * 70)
+    print("PROCESSING:", experiment_name)
+    print("=" * 70)
+
+
+    # --------------------------------------------------------
+    # Open Excel
+    # --------------------------------------------------------
+
+    try:
+
+        excel = pd.ExcelFile(file)
+
+    except Exception as e:
+
+        print("Could not open file:")
+        print(e)
+
+        continue
+
+
+    # ========================================================
+    # PROCESS EVERY SHEET
+    # ========================================================
+
+    for sheet in excel.sheet_names:
+
+        print("\nProcessing:", sheet)
+
+
+        try:
+
+            # ------------------------------------------------
+            # READ SHEET
+            # ------------------------------------------------
+
+            df = pd.read_excel(
+                file,
+                sheet_name=sheet,
+                header=None
+            )
+
+
+            # ------------------------------------------------
+            # CHECK SHEET
+            # ------------------------------------------------
+
+            if df.empty:
+
+                print("Empty sheet - skipped")
+
+                continue
+
+
+            # ------------------------------------------------
+            # FIND END OF HEADER
+            # ------------------------------------------------
+
+            first_column = (
+                df.iloc[:, 0]
+                .astype(str)
+            )
+
+
+            header_indices = df.index[
+                first_column.str.contains(
+                    r"\*\*\*End_of_Header\*\*\*",
+                    regex=True,
+                    na=False
+                )
+            ]
+
+
+            if len(header_indices) == 0:
+
+                print(
+                    "End_of_Header not found - skipped"
+                )
+
+                continue
+
+
+            header_row = header_indices[0]
+
+
+            # ------------------------------------------------
+            # DATA STARTS AFTER HEADER
+            # ------------------------------------------------
+
+            data = df.iloc[
+                header_row + 2:
+            ].copy()
+
+
+            # ------------------------------------------------
+            # CHECK NUMBER OF COLUMNS
+            # ------------------------------------------------
+
+            if data.shape[1] < 2:
+
+                print(
+                    "Not enough columns - skipped"
+                )
+
+                continue
+
+
+            # =================================================
+            # FIND TIME COLUMN
+            # =================================================
+
+            # In your files time is normally column 0
+
+            time = pd.to_numeric(
+                data.iloc[:, 0],
+                errors="coerce"
+            )
+
+
+            # =================================================
+            # FIND SIGNAL COLUMN
+            # =================================================
+
+            # We DON'T assume column 3 anymore.
+
+            numeric_columns = []
+
+
+            for col in range(
+                1,
+                data.shape[1]
+            ):
+
+                test_column = pd.to_numeric(
+                    data.iloc[:, col],
+                    errors="coerce"
+                )
+
+
+                valid_count = (
+                    test_column.notna().sum()
+                )
+
+
+                if valid_count > 10:
+
+                    numeric_columns.append(
+                        (
+                            col,
+                            valid_count
+                        )
+                    )
+
+
+            # ------------------------------------------------
+            # NO SIGNAL FOUND
+            # ------------------------------------------------
+
+            if len(numeric_columns) == 0:
+
+                print(
+                    "No numerical signal column found - skipped"
+                )
+
+                continue
+
+
+            # =================================================
+            # CHOOSE SIGNAL COLUMN
+            # =================================================
+
+            # Select the numerical column having
+            # the most valid data.
+
+            signal_column = max(
+                numeric_columns,
+                key=lambda x: x[1]
+            )[0]
+
+
+            print(
+                "Signal column selected:",
+                signal_column
+            )
+
+
+            # Extract signal
+
+            force = pd.to_numeric(
+                data.iloc[:, signal_column],
+                errors="coerce"
+            )
+
+
+            # =================================================
+            # REMOVE NaN
+            # =================================================
+
+            valid = (
+                time.notna()
+                &
+                force.notna()
+            )
+
+
+            time = time[
+                valid
+            ].to_numpy()
+
+
+            force = force[
+                valid
+            ].to_numpy()
+
+
+            # =================================================
+            # CHECK NUMBER OF SAMPLES
+            # =================================================
+
+            if len(force) < 2:
+
+                print(
+                    "Not enough numerical samples - skipped"
+                )
+
+                continue
+
+
+            # =================================================
+            # SAMPLING INFORMATION
+            # =================================================
+
+            N = len(force)
+
+
+            # Difference between consecutive
+            # time samples
+
+            time_difference = np.diff(
+                time
+            )
+
+
+            # Keep only positive differences
+
+            time_difference = (
+                time_difference[
+                    time_difference > 0
+                ]
+            )
+
+
+            if len(time_difference) == 0:
+
+                print(
+                    "Invalid time data - skipped"
+                )
+
+                continue
+
+
+            # Sampling interval
+
+            dt = np.mean(
+                time_difference
+            )
+
+
+            # Sampling frequency
+
+            Fs = 1 / dt
+
+
+            # Nyquist frequency
+
+            Nyquist = Fs / 2
+
+
+            # Frequency resolution
+
+            frequency_resolution = (
+                Fs / N
+            )
+
+
+            # =================================================
+            # REMOVE DC COMPONENT
+            # =================================================
+
+            signal = (
+                force -
+                np.mean(force)
+            )
+
+
+            # =================================================
+            # FFT
+            # =================================================
+
+            FFT = np.fft.rfft(
+                signal
+            )
+
+
+            # Frequency axis
+
+            frequencies = np.fft.rfftfreq(
+                N,
+                d=1 / Fs
+            )
+
+
+            # =================================================
+            # FFT MAGNITUDE
+            # =================================================
+
+            magnitude = (
+                2 / N
+            ) * np.abs(FFT)
+
+
+            # Correct DC component
+
+            magnitude[0] = (
+                magnitude[0] / 2
+            )
+
+
+            # =================================================
+            # REMOVE DC FOR PEAK SEARCH
+            # =================================================
+
+            magnitude_no_dc = (
+                magnitude.copy()
+            )
+
+
+            magnitude_no_dc[0] = 0
+
+
+            # =================================================
+            # DOMINANT FREQUENCY
+            # =================================================
+
+            peak_index = np.argmax(
+                magnitude_no_dc
+            )
+
+
+            dominant_frequency = (
+                frequencies[
+                    peak_index
+                ]
+            )
+
+
+            dominant_amplitude = (
+                magnitude[
+                    peak_index
+                ]
+            )
+
+
+            # =================================================
+            # FFT RMS
+            # =================================================
+
+            fft_rms = np.sqrt(
+                np.mean(
+                    magnitude_no_dc ** 2
+                )
+            )
+
+
+            # =================================================
+            # SPECTRAL ENERGY
+            # =================================================
+
+            spectral_energy = np.sum(
+                magnitude_no_dc ** 2
+            )
+
+
+            # =================================================
+            # SPECTRAL CENTROID
+            # =================================================
+
+            total_magnitude = np.sum(
+                magnitude_no_dc
+            )
+
+
+            if total_magnitude > 0:
+
+                spectral_centroid = (
+                    np.sum(
+                        frequencies *
+                        magnitude_no_dc
+                    )
+                    /
+                    total_magnitude
+                )
+
+            else:
+
+                spectral_centroid = 0
+
+
+            # =================================================
+            # SPECTRAL BANDWIDTH
+            # =================================================
+
+            if total_magnitude > 0:
+
+                spectral_bandwidth = np.sqrt(
+
+                    np.sum(
+
+                        (
+                            frequencies -
+                            spectral_centroid
+                        ) ** 2
+
+                        *
+                        magnitude_no_dc
+
+                    )
+                    /
+                    total_magnitude
+                )
+
+            else:
+
+                spectral_bandwidth = 0
+
+
+            # =================================================
+            # TIME DOMAIN FEATURES
+            # =================================================
+
+            signal_rms = np.sqrt(
+                np.mean(
+                    signal ** 2
+                )
+            )
+
+
+            signal_peak = np.max(
+                np.abs(signal)
+            )
+
+
+            peak_to_peak = (
+                np.max(signal)
+                -
+                np.min(signal)
+            )
+
+
+            variance = np.var(
+                signal
+            )
+
+
+            # =================================================
+            # STORE RESULT
+            # =================================================
+
+            all_results.append({
+
+                "Experiment":
+                    experiment_name,
+
+                "Channel":
+                    sheet,
+
+                "Signal Column":
+                    signal_column,
+
+                "Number of Samples":
+                    N,
+
+                "Sampling Interval (s)":
+                    dt,
+
+                "Sampling Frequency (Hz)":
+                    Fs,
+
+                "Nyquist Frequency (Hz)":
+                    Nyquist,
+
+                "Frequency Resolution (Hz)":
+                    frequency_resolution,
+
+                "Dominant Frequency (Hz)":
+                    dominant_frequency,
+
+                "Dominant Amplitude":
+                    dominant_amplitude,
+
+                "FFT RMS":
+                    fft_rms,
+
+                "Spectral Energy":
+                    spectral_energy,
+
+                "Spectral Centroid (Hz)":
+                    spectral_centroid,
+
+                "Spectral Bandwidth (Hz)":
+                    spectral_bandwidth,
+
+                "Signal RMS":
+                    signal_rms,
+
+                "Signal Peak":
+                    signal_peak,
+
+                "Peak-to-Peak":
+                    peak_to_peak,
+
+                "Variance":
+                    variance
+
+            })
+
+
+            # =================================================
+            # PRINT RESULT
+            # =================================================
+
+            print(
+                "SUCCESS"
+            )
+
+            print(
+                "Samples:",
+                N
+            )
+
+            print(
+                "Sampling Frequency:",
+                round(
+                    Fs,
+                    6
+                ),
+                "Hz"
+            )
+
+            print(
+                "Frequency Resolution:",
+                round(
+                    frequency_resolution,
+                    6
+                ),
+                "Hz"
+            )
+
+            print(
+                "Dominant Frequency:",
+                round(
+                    dominant_frequency,
+                    6
+                ),
+                "Hz"
+            )
+
+            print(
+                "Dominant Amplitude:",
+                round(
+                    dominant_amplitude,
+                    6
+                )
+            )
+
+
+        except Exception as e:
+
+            print(
+                "ERROR processing:",
+                sheet
+            )
+
+            print(
+                str(e)
+            )
+
+            continue
+
+
+# ============================================================
+# CREATE MASTER DATAFRAME
+# ============================================================
+
+if len(all_results) == 0:
+
+    print("\n")
+    print("=" * 70)
+    print("NO RESULTS WERE GENERATED")
+    print("=" * 70)
+
+else:
+
+    results_df = pd.DataFrame(
+        all_results
+    )
+
+
+    # ========================================================
+    # ROUND VALUES
+    # ========================================================
+
+    results_df = results_df.round(
+        6
+    )
+
+
+    # ========================================================
+    # OUTPUT FILE
+    # ========================================================
+
+    output_file = (
+        r"C:\Users\Vrushabh\Downloads"
+        r"\ALL_EXPERIMENTS_FFT_FEATURES.xlsx"
+    )
+
+
+    # ========================================================
+    # IF OUTPUT FILE IS OPEN
+    # ========================================================
+
+    if os.path.exists(output_file):
+
+        try:
+
+            with open(
+                output_file,
+                "a"
+            ):
+                pass
+
+        except PermissionError:
+
+            output_file = (
+                r"C:\Users\Vrushabh\Downloads"
+                r"\ALL_EXPERIMENTS_FFT_FEATURES_NEW.xlsx"
+            )
+
+
+    # ========================================================
+    # SAVE
+    # ========================================================
+
+    results_df.to_excel(
+        output_file,
+        index=False
+    )
+
+
+    # ========================================================
+    # FINAL OUTPUT
+    # ========================================================
+
+    print("\n")
+    print("=" * 70)
+    print("FFT FEATURE EXTRACTION COMPLETE")
+    print("=" * 70)
+
+
+    print(
+        "\nExperiments processed:",
+        results_df["Experiment"].nunique()
+    )
+
+
+    print(
+        "Channel results:",
+        len(results_df)
+    )
+
+
+    print(
+        "\nSaved as:"
+    )
+
+
+    print(
+        output_file
+    )
+
+
+    print("\n")
+    print(
+        results_df.to_string(
+            index=False
+        )
+    )
