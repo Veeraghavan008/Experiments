@@ -1,0 +1,604 @@
+"""
+CivicCare - Smart Public Complaint Management System
+Mini-project prototype: TF-IDF (word + character n-grams) + Logistic Regression + Tkinter.
+
+Run app:                python app.py
+Run evaluation report:  python app.py --evaluate
+"""
+
+import csv
+import os
+import re
+import sys
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import datetime
+
+import joblib
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+from sklearn.model_selection import (
+    GridSearchCV, StratifiedKFold, cross_val_predict, cross_val_score
+)
+from sklearn.pipeline import FeatureUnion, Pipeline
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASET_FILE = os.path.join(BASE_DIR, "complaints_dataset.csv")
+COMPLAINTS_FILE = os.path.join(BASE_DIR, "submitted_complaints.csv")
+MODEL_FILE = os.path.join(BASE_DIR, "civiccare_model.joblib")
+HELDOUT_FILE = os.path.join(BASE_DIR, "heldout_test.csv")  # optional never-trained-on test set
+MODEL_VERSION = 3  # bump when the pipeline changes so old cached models are discarded
+
+C_GRID = [1, 3, 10, 30, 100, 300]  # regularisation strengths tried by GridSearchCV
+
+# Below this confidence the prediction is not trusted and goes to manual review.
+CONFIDENCE_THRESHOLD = 0.40
+UNCLASSIFIED = "Unclassified (Manual Review)"
+
+DEPARTMENTS = {
+    "Roads & Potholes": "Road Maintenance Department",
+    "Water Supply": "Water Department",
+    "Garbage & Sanitation": "Sanitation Department",
+    "Electricity & Streetlights": "Electrical Department",
+    "Drainage & Sewage": "Drainage Department",
+}
+
+# sklearn's English stop-word list removes negations ("no", "not", "without"),
+# which are exactly the words that matter in complaints like "no water supply"
+# or "streetlight not working". Keep them.
+KEEP_WORDS = {"no", "not", "nor", "never", "without", "cannot", "off", "out", "down"}
+STOP_WORDS = sorted(ENGLISH_STOP_WORDS - KEEP_WORDS)
+
+# Normalise common spelling / spacing variants so they map to one token.
+NORMALISATIONS = [
+    (r"\bpot\s*holes?\b", "pothole"),
+    (r"\bstreet\s*lights?\b", "streetlight"),
+    (r"\blamp\s*posts?\b", "streetlight"),
+    (r"\bdust\s*bins?\b", "dustbin"),
+    (r"\b(sewer|sewerage)\b", "sewage"),
+    (r"\bmain\s*holes?\b", "manhole"),
+    (r"\bman\s*holes?\b", "manhole"),
+    (r"\bdrain\s*age\b", "drainage"),
+    (r"\bcan\s*not\b", "cannot"),
+]
+
+
+def clean_text(text):
+    """Text cleaning used as the TF-IDF preprocessor (so train and predict match)."""
+    text = str(text).lower()
+    for pattern, replacement in NORMALISATIONS:
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"[^a-z\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def build_pipeline():
+    """Word n-grams capture phrases; char n-grams make the model robust to typos."""
+    features = FeatureUnion([
+        ("word", TfidfVectorizer(
+            preprocessor=clean_text, ngram_range=(1, 2),
+            stop_words=STOP_WORDS, sublinear_tf=True
+        )),
+        ("char", TfidfVectorizer(
+            preprocessor=clean_text, analyzer="char_wb",
+            ngram_range=(3, 5), sublinear_tf=True
+        )),
+    ])
+    return Pipeline([
+        ("features", features),
+        ("classifier", LogisticRegression(
+            max_iter=2000, class_weight="balanced", random_state=42
+        )),
+    ])
+
+
+def load_dataset():
+    """Load and clean the labelled data. Removes duplicates so evaluation is honest."""
+    if not os.path.exists(DATASET_FILE):
+        raise FileNotFoundError("complaints_dataset.csv was not found.")
+
+    data = pd.read_csv(DATASET_FILE)
+    data = data.dropna(subset=["complaint", "category"])
+    data["complaint"] = data["complaint"].astype(str).str.strip()
+    data["category"] = data["category"].astype(str).str.strip()
+    data["clean"] = data["complaint"].apply(clean_text)
+    data = data[data["clean"].str.len() > 0]
+    # Identical (or near-identical after cleaning) rows in both train and test
+    # inflate accuracy, so keep only one copy.
+    data = data.drop_duplicates(subset=["clean", "category"]).reset_index(drop=True)
+    return data
+
+
+def make_cv(y):
+    min_count = int(y.value_counts().min())
+    if min_count < 2:
+        raise ValueError(
+            "Every category needs at least 2 examples in complaints_dataset.csv."
+        )
+    return StratifiedKFold(n_splits=min(5, min_count), shuffle=True, random_state=42)
+
+
+def train_model(force=False, quick=False):
+    """Train (or load a cached) classifier.
+
+    Returns (model, cross_validated_accuracy, dataset_size).
+    Accuracy is measured with nested stratified cross-validation, so the
+    hyper-parameter search never sees the data it is scored on.
+    quick=True skips the (slower) nested CV and is used after admin corrections.
+    """
+    data = load_dataset()
+
+    if (not force and os.path.exists(MODEL_FILE)
+            and os.path.getmtime(MODEL_FILE) >= os.path.getmtime(DATASET_FILE)):
+        try:
+            cached = joblib.load(MODEL_FILE)
+            if cached.get("version") == MODEL_VERSION:
+                return cached["model"], cached["accuracy"], cached["size"]
+        except Exception:
+            pass  # corrupt or incompatible cache -> retrain
+
+    X, y = data["complaint"], data["category"]
+    cv = make_cv(y)
+
+    search = GridSearchCV(
+        build_pipeline(),
+        param_grid={"classifier__C": C_GRID},
+        cv=cv, scoring="f1_macro", refit=True
+    )
+    outer_cv = StratifiedKFold(n_splits=cv.n_splits, shuffle=True, random_state=7)
+    if quick:
+        search.fit(X, y)
+        model = search.best_estimator_
+        accuracy = float(cross_val_score(model, X, y, cv=outer_cv, scoring="accuracy").mean())
+    else:
+        accuracy = float(cross_val_score(search, X, y, cv=outer_cv, scoring="accuracy").mean())
+        search.fit(X, y)  # final model: best C, refit on all examples
+        model = search.best_estimator_
+
+    joblib.dump(
+        {"version": MODEL_VERSION, "model": model, "accuracy": accuracy, "size": len(data)},
+        MODEL_FILE
+    )
+    return model, accuracy, len(data)
+
+
+def evaluate():
+    """Print a per-category report so you can see exactly where the model fails."""
+    data = load_dataset()
+    X, y = data["complaint"], data["category"]
+    cv = make_cv(y)
+    search = GridSearchCV(
+        build_pipeline(), {"classifier__C": C_GRID},
+        cv=cv, scoring="f1_macro"
+    )
+    predictions = cross_val_predict(search, X, y, cv=cv)
+    print(f"Examples after cleaning/deduplication: {len(data)}")
+    print(classification_report(y, predictions, zero_division=0))
+    if os.path.exists(HELDOUT_FILE):
+        test = pd.read_csv(HELDOUT_FILE).dropna()
+        model, _, _ = train_model()
+        held = model.predict(test["complaint"])
+        print(f"\nHeld-out test set ({len(test)} unseen complaints): "
+              f"accuracy {(held == test['category']).mean():.1%}")
+        for text, truth, guess in zip(test["complaint"], test["category"], held):
+            if truth != guess:
+                print(f"  [{truth} -> {guess}] {text}")
+    wrong = data.assign(predicted=predictions)[y != predictions]
+    if not wrong.empty:
+        print("\nMisclassified examples (fix labels or add similar examples):")
+        for _, r in wrong.iterrows():
+            print(f"  [{r['category']} -> {r['predicted']}] {r['complaint']}")
+
+
+def add_training_example(complaint, category):
+    """Append an admin-corrected complaint to the training data (skips duplicates)."""
+    key = clean_text(complaint)
+    with open(DATASET_FILE, "r", newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if clean_text(row.get("complaint", "")) == key:
+                return False
+    with open(DATASET_FILE, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow([complaint.strip(), category])
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Priority detection (rule-based)
+# ---------------------------------------------------------------------------
+HIGH_PATTERNS = [
+    r"\baccidents?\b", r"\bdanger(ous)?\b", r"\bemergency\b",
+    r"\bflood(ed|ing|s)?\b", r"\binjur(y|ies|ed)\b",
+    r"\bexposed (wire|wires|cable|cables)\b", r"\bsewage\b", r"\bfire\b",
+    r"\b(electric )?shock\b", r"\bspark(s|ing)?\b", r"\bopen manhole\b",
+    r"\bmanhole\b.*\b(open|missing|uncovered)\b", r"\bfallen (pole|wire|tree)\b",
+    r"\bhospital\b", r"\bunsafe\b",
+]
+# "overflowing" is urgent for drains/water, but routine for a full dustbin.
+OVERFLOW_PATTERN = r"\boverflow(ing|s|ed)?\b"
+OVERFLOW_HIGH_CATEGORIES = {"Drainage & Sewage", "Water Supply"}
+
+MEDIUM_PATTERNS = [
+    r"\bnot working\b", r"\bnot (getting|coming)\b", r"\bstopped\b",
+    r"\bleak(s|ing|age)?\b", r"\bblock(ed|age)?\b", r"\bpothole\b",
+    r"\bbroken\b", r"\bbad smell\b", r"\bstink(s|ing)?\b", r"\bno water\b",
+    r"\bdamaged\b", r"\bdark\b", r"\bgarbage\b", r"\boverflow(ing|s|ed)?\b",
+    r"\bno (electricity|power)\b", r"\bpower (cut|outage)\b",
+]
+NEGATION_BEFORE = re.compile(r"\b(no|not|without|never)\s+(any\s+)?$")
+
+
+def _has_match(patterns, text):
+    """True if a pattern matches and is not directly negated ('no accidents')."""
+    for pattern in patterns:
+        for m in re.finditer(pattern, text):
+            if not NEGATION_BEFORE.search(text[max(0, m.start() - 12):m.start()]):
+                return True
+    return False
+
+
+def detect_priority(text, category=None):
+    """Rule-based urgency estimate (whole-word matching, negation-aware)."""
+    text = re.sub(r"\s+", " ", text.lower())
+    if _has_match(HIGH_PATTERNS, text):
+        return "High"
+    if category in OVERFLOW_HIGH_CATEGORIES and _has_match([OVERFLOW_PATTERN], text):
+        return "High"
+    if _has_match(MEDIUM_PATTERNS, text):
+        return "Medium"
+    return "Low"
+
+
+def ensure_complaints_file():
+    if not os.path.exists(COMPLAINTS_FILE):
+        with open(COMPLAINTS_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Complaint ID", "Date", "Complaint", "Category",
+                "Department", "Priority", "Status"
+            ])
+
+
+class CivicCareApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("CivicCare | Smart Public Complaint Management")
+        self.root.geometry("900x650")
+        self.root.minsize(780, 570)
+        self.root.configure(bg="#eef3f8")
+
+        try:
+            self.model, self.accuracy, self.dataset_size = train_model()
+        except Exception as exc:
+            messagebox.showerror("Model error", str(exc))
+            self.root.destroy()
+            return
+
+        ensure_complaints_file()
+        self.build_ui()
+        self.refresh_complaints()
+
+    def build_ui(self):
+        header = tk.Frame(self.root, bg="#15344d", padx=22, pady=18)
+        header.pack(fill="x")
+        tk.Label(
+            header, text="CivicCare", font=("Arial", 23, "bold"),
+            fg="white", bg="#15344d"
+        ).pack(anchor="w")
+        tk.Label(
+            header, text="Smart Public Complaint Management System",
+            font=("Arial", 11), fg="#d7e7f3", bg="#15344d"
+        ).pack(anchor="w", pady=(3, 0))
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=18, pady=16)
+
+        self.submit_tab = tk.Frame(self.notebook, bg="white", padx=22, pady=20)
+        self.dashboard_tab = tk.Frame(self.notebook, bg="white", padx=18, pady=18)
+        self.notebook.add(self.submit_tab, text="Submit Complaint")
+        self.notebook.add(self.dashboard_tab, text="Admin Dashboard")
+
+        self.build_submit_tab()
+        self.build_dashboard_tab()
+
+    def model_info_text(self):
+        return (f"Model: TF-IDF (word + char n-grams) + Logistic Regression  |  "
+                f"Training examples: {self.dataset_size}  |  "
+                f"Cross-validated accuracy: {self.accuracy:.0%}")
+
+    def build_submit_tab(self):
+        tk.Label(
+            self.submit_tab, text="Report a Public Issue",
+            font=("Arial", 18, "bold"), bg="white", fg="#15344d"
+        ).pack(anchor="w")
+        tk.Label(
+            self.submit_tab,
+            text="Describe the issue in a sentence. The NLP model will predict its category.",
+            font=("Arial", 10), bg="white", fg="#536575"
+        ).pack(anchor="w", pady=(5, 15))
+
+        tk.Label(
+            self.submit_tab, text="Complaint description",
+            font=("Arial", 11, "bold"), bg="white"
+        ).pack(anchor="w")
+        self.complaint_text = tk.Text(
+            self.submit_tab, height=6, wrap="word",
+            font=("Arial", 11), relief="solid", bd=1, padx=9, pady=8
+        )
+        self.complaint_text.pack(fill="x", pady=(7, 12))
+        self.complaint_text.insert(
+            "1.0",
+            "There is a large pothole on the road near our college. "
+            "It is causing accidents and traffic problems."
+        )
+
+        tk.Button(
+            self.submit_tab, text="Analyse and Submit Complaint",
+            command=self.analyse_and_submit, bg="#1769aa", fg="white",
+            activebackground="#125487", activeforeground="white",
+            font=("Arial", 11, "bold"), padx=14, pady=10,
+            relief="flat", cursor="hand2"
+        ).pack(anchor="w")
+
+        self.result_frame = tk.LabelFrame(
+            self.submit_tab, text=" NLP Analysis Result ",
+            font=("Arial", 11, "bold"), bg="white", fg="#15344d",
+            padx=14, pady=12
+        )
+        self.result_frame.pack(fill="x", pady=18)
+
+        self.result_labels = {}
+        for key in ["Category", "Department", "Priority", "Confidence"]:
+            row = tk.Frame(self.result_frame, bg="white")
+            row.pack(fill="x", pady=4)
+            tk.Label(
+                row, text=f"{key}:", width=15, anchor="w",
+                font=("Arial", 10, "bold"), bg="white"
+            ).pack(side="left")
+            value = tk.Label(
+                row, text="Not analysed yet", anchor="w",
+                font=("Arial", 10), bg="white", fg="#1769aa"
+            )
+            value.pack(side="left")
+            self.result_labels[key] = value
+
+        self.model_info = tk.Label(
+            self.submit_tab, text=self.model_info_text(),
+            font=("Arial", 9), bg="white", fg="#64748b"
+        )
+        self.model_info.pack(anchor="w", side="bottom", pady=(8, 0))
+
+    def build_dashboard_tab(self):
+        tk.Label(
+            self.dashboard_tab, text="Complaint Dashboard",
+            font=("Arial", 18, "bold"), bg="white", fg="#15344d"
+        ).pack(anchor="w")
+
+        self.stats_label = tk.Label(
+            self.dashboard_tab, text="", font=("Arial", 10),
+            bg="white", fg="#334155"
+        )
+        self.stats_label.pack(anchor="w", pady=10)
+
+        columns = ("id", "date", "category", "priority", "status")
+        self.tree = ttk.Treeview(
+            self.dashboard_tab, columns=columns, show="headings", height=15
+        )
+        headings = {
+            "id": ("Complaint ID", 95),
+            "date": ("Date", 145),
+            "category": ("Category", 190),
+            "priority": ("Priority", 95),
+            "status": ("Status", 120),
+        }
+        for col, (heading, width) in headings.items():
+            self.tree.heading(col, text=heading)
+            self.tree.column(col, width=width, anchor="center")
+
+        self.tree.pack(fill="both", expand=True, pady=8)
+
+        controls = tk.Frame(self.dashboard_tab, bg="white")
+        controls.pack(fill="x", pady=8)
+        tk.Label(
+            controls, text="Update selected complaint status:",
+            bg="white", font=("Arial", 10)
+        ).pack(side="left")
+        self.status_choice = ttk.Combobox(
+            controls, values=["Pending", "In Progress", "Resolved"],
+            state="readonly", width=15
+        )
+        self.status_choice.set("In Progress")
+        self.status_choice.pack(side="left", padx=8)
+        tk.Button(
+            controls, text="Update Status", command=self.update_status,
+            bg="#1769aa", fg="white", relief="flat", padx=12, pady=6
+        ).pack(side="left")
+
+        tk.Button(
+            controls, text="Refresh", command=self.refresh_complaints,
+            relief="groove", padx=12, pady=6
+        ).pack(side="right")
+
+        fix = tk.Frame(self.dashboard_tab, bg="white")
+        fix.pack(fill="x", pady=4)
+        tk.Label(
+            fix, text="Wrong category? Correct it (the model learns from this):",
+            bg="white", font=("Arial", 10)
+        ).pack(side="left")
+        self.category_choice = ttk.Combobox(
+            fix, values=list(DEPARTMENTS), state="readonly", width=26
+        )
+        self.category_choice.current(0)
+        self.category_choice.pack(side="left", padx=8)
+        tk.Button(
+            fix, text="Correct & Learn", command=self.correct_category,
+            bg="#2e7d32", fg="white", relief="flat", padx=12, pady=6
+        ).pack(side="left")
+
+    def analyse_and_submit(self):
+        complaint = self.complaint_text.get("1.0", "end").strip()
+        if len(complaint) < 8:
+            messagebox.showwarning(
+                "Complaint too short", "Please enter a more detailed complaint."
+            )
+            return
+
+        # The model's vectorizers apply clean_text themselves, so pass raw text.
+        probabilities = self.model.predict_proba([complaint])[0]
+        best = probabilities.argmax()
+        predicted = self.model.classes_[best]
+        confidence = probabilities[best]
+
+        if confidence < CONFIDENCE_THRESHOLD:
+            # Don't silently mis-route a complaint the model is unsure about.
+            category = UNCLASSIFIED
+            department = "General Administration"
+            confidence_text = f"{confidence:.1%} - low, best guess: {predicted}"
+        else:
+            category = predicted
+            department = DEPARTMENTS.get(category, "General Administration")
+            confidence_text = f"{confidence:.1%} (model estimate)"
+
+        priority = detect_priority(complaint, predicted)
+
+        for key, value in {
+            "Category": category,
+            "Department": department,
+            "Priority": priority,
+            "Confidence": confidence_text
+        }.items():
+            self.result_labels[key].config(text=value)
+
+        complaint_id = self.get_next_id()
+        with open(COMPLAINTS_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                complaint_id,
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                complaint, category, department, priority, "Pending"
+            ])
+
+        self.refresh_complaints()
+        messagebox.showinfo(
+            "Complaint submitted",
+            f"Complaint #{complaint_id} has been saved successfully."
+        )
+
+    def get_next_id(self):
+        with open(COMPLAINTS_FILE, "r", newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        ids = [int(row["Complaint ID"]) for row in rows if row["Complaint ID"].isdigit()]
+        return max(ids, default=1000) + 1
+
+    def refresh_complaints(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        with open(COMPLAINTS_FILE, "r", newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+        for row in reversed(rows):
+            self.tree.insert("", "end", values=(
+                row["Complaint ID"], row["Date"], row["Category"],
+                row["Priority"], row["Status"]
+            ))
+
+        total = len(rows)
+        pending = sum(r["Status"] == "Pending" for r in rows)
+        progress = sum(r["Status"] == "In Progress" for r in rows)
+        resolved = sum(r["Status"] == "Resolved" for r in rows)
+        self.stats_label.config(
+            text=f"Total: {total}     |     Pending: {pending}     |     "
+                 f"In Progress: {progress}     |     Resolved: {resolved}"
+        )
+
+    def correct_category(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning(
+                "Select complaint", "Please select a complaint from the table."
+            )
+            return
+
+        complaint_id = self.tree.item(selected[0], "values")[0]
+        new_category = self.category_choice.get()
+        new_department = DEPARTMENTS[new_category]
+
+        with open(COMPLAINTS_FILE, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            fieldnames = reader.fieldnames
+
+        text = None
+        for row in rows:
+            if row["Complaint ID"] == complaint_id:
+                row["Category"] = new_category
+                row["Department"] = new_department
+                text = row["Complaint"]
+                break
+        if text is None:
+            return
+
+        with open(COMPLAINTS_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        added = add_training_example(text, new_category)
+        if added:
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
+            try:
+                self.model, self.accuracy, self.dataset_size = train_model(force=True, quick=True)
+                self.model_info.config(text=self.model_info_text())
+            finally:
+                self.root.config(cursor="")
+
+        self.refresh_complaints()
+        messagebox.showinfo(
+            "Category corrected",
+            f"Complaint #{complaint_id} moved to {new_category}."
+            + ("\nThe model was retrained with this example." if added else "")
+        )
+
+    def update_status(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning(
+                "Select complaint", "Please select a complaint from the table."
+            )
+            return
+
+        complaint_id = self.tree.item(selected[0], "values")[0]
+        new_status = self.status_choice.get()
+
+        with open(COMPLAINTS_FILE, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            fieldnames = reader.fieldnames
+
+        for row in rows:
+            if row["Complaint ID"] == complaint_id:
+                row["Status"] = new_status
+                break
+
+        with open(COMPLAINTS_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        self.refresh_complaints()
+        messagebox.showinfo(
+            "Status updated", f"Complaint #{complaint_id} is now {new_status}."
+        )
+
+
+if __name__ == "__main__":
+    if "--evaluate" in sys.argv:
+        evaluate()
+    else:
+        root = tk.Tk()
+        app = CivicCareApp(root)
+        root.mainloop()
